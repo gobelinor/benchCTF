@@ -1,0 +1,73 @@
+# benchCTF model configuration.
+#
+# Each entry picks a `runner` (the CLI that drives the agent loop):
+#
+#   runner: opencode      → invokes `opencode run --format json` (any provider authed in opencode)
+#   runner: claude_code   → invokes `claude -p --output-format json`   (uses Claude Code's OAuth)
+#   runner: codex         → invokes `codex exec --json`               (uses Codex's ChatGPT OAuth)
+#
+# Pricing is in USD per million tokens (public API rates) and powers the synthetic
+# cost column. Tokens accounting is normalized across runners so:
+#   pricing.input        applies to fresh input tokens (excluding cached)
+#   pricing.output       applies to output tokens
+#   pricing.cache_read   applies to cached input tokens (default 0 if omitted)
+#   pricing.cache_write  applies to cache-creation tokens (default 0 if omitted)
+#   pricing.reasoning    applies to reasoning tokens (defaults to pricing.output)
+
+defaults:
+  timeout_seconds: 1800   # 30 min/run
+  runs: 3
+
+models:
+  # ---- Anthropic via Claude Code OAuth (no API key needed) ----
+  - name: claude-opus-4-7
+    runner: claude_code
+    claude_model: opus
+    pricing:
+      input: 15.00
+      output: 75.00
+      cache_read: 1.50
+      cache_write: 18.75
+
+  - name: claude-sonnet-4-6
+    runner: claude_code
+    claude_model: sonnet
+    pricing:
+      input: 3.00
+      output: 15.00
+      cache_read: 0.30
+      cache_write: 3.75
+
+  # ---- OpenAI via Codex (ChatGPT) OAuth ----
+  - name: codex-gpt-5.5
+    runner: codex
+    codex_model: gpt-5.5
+    pricing:
+      input: 5.00
+      output: 20.00
+      cache_read: 0.50
+
+  # ---- Anything authenticated via opencode (API key or its own OAuth) ----
+  - name: opencode-claude-sonnet-4-6
+    runner: opencode
+    opencode_model: anthropic/claude-sonnet-4-5
+    variant: high
+    pricing:
+      input: 3.00
+      output: 15.00
+      cache_read: 0.30
+      cache_write: 3.75
+
+  - name: opencode-gemini-2.5-pro
+    runner: opencode
+    opencode_model: google/gemini-2.5-pro
+    pricing:
+      input: 1.25
+      output: 10.00
+
+  - name: opencode-copilot-gpt-5
+    runner: opencode
+    opencode_model: github-copilot/gpt-5
+    pricing:
+      input: 1.25
+      output: 10.00
