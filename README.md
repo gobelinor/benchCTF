@@ -1,46 +1,38 @@
 # benchCTF
 
-Benchmark and compare AI models on **agentic CTF challenge solving** under a single, identical orchestrator.
+Benchmark AI models on agentic CTF challenges.
 
-The fairness invariant: every model goes through the **same** [`opencode`](https://opencode.ai/) `run` invocation, with the **same** prompt, in its **own isolated working directory**. The only thing that changes between runs is the underlying model. The harness records tokens, wall time, success rate, and a synthetic cost so models on flat-rate OAuth subscriptions (Claude Pro/Max, Copilot, Gemini, etc.) can be compared on equal footing with metered API providers.
+A small Python harness that runs the same challenge against multiple (orchestrator, model) pairs in isolated working directories, then reports tokens, time, success rate, and a synthetic dollar cost so different billing models can be compared on equal footing.
 
-```
-┌──────────────┐                ┌────────────────┐
-│  bench.py    │ ──spawn───►    │  opencode run  │ ──►  isolated workdir
-│  orchestrator│                │  --model X     │       per (model, run)
-└──────┬───────┘                └────────┬───────┘
-       │                                 │ JSON events
-       │                                 ▼
-       │                         opencode export
-       │                                 │
-       └──── aggregate, write ───────────┘  →  runs/<ts>/report.md
-```
+## Modular by design
 
-## Why opencode as the harness
+Three orchestrators ("runners") are supported, picked per-model in `models.yaml`:
 
-`opencode` already abstracts over Anthropic, OpenAI, Google, GitHub Copilot, OpenRouter, and more — and it supports OAuth login flows for the providers that offer them. That means you can typically benchmark **without a single API key**: log in once with `opencode auth login` and reuse your existing subscriptions.
+| runner | how it runs | auth |
+|---|---|---|
+| `opencode` | `opencode run --format json` | whatever you set up via `opencode auth login` (Anthropic / OpenAI / Google / Copilot / OpenRouter / API keys) |
+| `claude_code` | `claude -p --output-format stream-json` | inherits Claude Code's OAuth (Claude Pro / Max / Team / API key) |
+| `codex` | `codex exec --json` | inherits Codex's ChatGPT OAuth (Plus / Pro / API key) |
+
+You can mix freely:
+
+- **Pure model comparison** — same orchestrator (e.g. `opencode`), several models, only the model varies.
+- **Cross-stack comparison** — different orchestrators, e.g. Claude Code vs Codex vs opencode-with-Gemini, end-to-end stacks compared as black boxes.
 
 ## Install
 
 Requirements:
 
 - Python ≥ 3.10
-- `opencode` ≥ 1.3 on `PATH` (`npm install -g opencode-ai` or [opencode.ai/docs/install](https://opencode.ai/docs/install))
-- One or more authenticated providers: `opencode auth login` (Anthropic / OpenAI / Google / GitHub Copilot / OpenRouter / …)
+- Whichever CLI you intend to use, on `PATH`:
+  - `opencode` ≥ 1.3 + at least one provider authenticated (`opencode auth login`)
+  - `claude` (Claude Code), already logged in
+  - `codex`, already logged in
 
 ```bash
-git clone <your fork of this repo>
-cd benchCTF
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp models.yaml.example models.yaml   # then edit to keep only models you can run
-```
-
-Verify your auth:
-
-```bash
-opencode auth list
-opencode models                       # should list models for each authenticated provider
+cp models.yaml.example models.yaml   # then trim to the models you want
 ```
 
 ## Run
@@ -49,113 +41,140 @@ opencode models                       # should list models for each authenticate
 python bench.py --challenge challenges/example-easy
 ```
 
-Common flags:
-
 | flag | default | purpose |
 |---|---|---|
-| `--challenge PATH` | (required) | dir containing `challenge.md` and any other files |
-| `--models PATH` | `models.yaml` | model configuration |
-| `--runs N` | `defaults.runs` from yaml (3) | runs per model — for mean/median/std |
-| `--timeout SECS` | `defaults.timeout_seconds` (1800) | per-run wall-clock cap |
-| `--no-agents` | off | run baseline (no `AGENTS.md` injected) |
-| `--agents PATH` | `templates/AGENTS.md` | use a custom methodology file |
+| `--challenge PATH` | (required) | challenge dir (must contain `challenge.md`) |
+| `--models PATH` | `models.yaml` | model config |
+| `--runs N` | from `defaults.runs` | runs per model (for mean/median/std) |
+| `--timeout SECS` | from `defaults.timeout_seconds` | per-run wall-clock cap |
+| `--no-agents` | off | skip the methodology prefix (baseline mode) |
+| `--agents PATH` | `templates/AGENTS.md` | use a custom methodology |
 | `--only NAMES` | (all) | comma-separated model names to include |
 | `--out DIR` | `runs` | output root |
 
-The harness runs models **sequentially** to avoid OAuth rate-limit collisions and keep the report deterministic.
+Models run **sequentially**, each in its own fresh working directory copied from the challenge dir.
+
+## Examples
+
+### Same orchestrator, different models — pure model comparison
+
+`models.yaml`:
+
+```yaml
+defaults:
+  timeout_seconds: 1800
+  runs: 3
+
+models:
+  - name: opencode-claude-sonnet-4-6
+    runner: opencode
+    opencode_model: anthropic/claude-sonnet-4-5
+    pricing: { input: 3.00, output: 15.00, cache_read: 0.30, cache_write: 3.75 }
+
+  - name: opencode-gpt-5
+    runner: opencode
+    opencode_model: openai/gpt-5
+    pricing: { input: 1.25, output: 10.00 }
+
+  - name: opencode-gemini-2.5-pro
+    runner: opencode
+    opencode_model: google/gemini-2.5-pro
+    pricing: { input: 1.25, output: 10.00 }
+```
+
+Same harness, same prompt, same workdir layout — only the model varies.
+
+### Different orchestrators, different models — full-stack comparison
+
+`models.yaml`:
+
+```yaml
+defaults:
+  timeout_seconds: 2700
+  runs: 1
+
+models:
+  - name: claude-opus-4-7
+    runner: claude_code        # uses Claude Code's OAuth
+    claude_model: opus
+    pricing: { input: 15.00, output: 75.00, cache_read: 1.50, cache_write: 18.75 }
+
+  - name: codex-gpt-5.5
+    runner: codex              # uses Codex's ChatGPT OAuth
+    codex_model: gpt-5.5
+    pricing: { input: 5.00, output: 20.00, cache_read: 0.50 }
+```
+
+This compares two real-world stacks (CLI + model + ambient config). Note: Claude Code and Codex each load their own global config (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`); opencode does not. That's part of what you're benchmarking when you compare full stacks.
 
 ## Output
 
 Each invocation creates `runs/<utc-timestamp>/`:
 
 ```
-runs/20260428-180123/
-├── report.md                       ← summary + per-run details (markdown)
-├── results.json                    ← all results in one JSON array
-├── claude-sonnet-4-6/
-│   ├── run-1/
-│   │   ├── workdir/                ← isolated copy of challenge + AGENTS.md
-│   │   ├── stdout.jsonl            ← raw opencode JSON event stream
-│   │   ├── stderr.log
-│   │   └── result.json             ← per-run record
-│   ├── run-2/…
-│   └── run-3/…
-└── gpt-5/…
+runs/20260428-194641/
+├── report.md                  ← summary + per-run details
+├── results.json               ← all results in one array
+└── <model-slug>/run-<n>/
+    ├── workdir/               ← isolated copy of challenge files
+    ├── stdout.jsonl           ← raw runner event stream
+    ├── stderr.log
+    └── result.json            ← per-run record
 ```
 
-A console summary table is also printed at the end.
+A `rich` table is also printed to the console at the end.
 
 ## Challenge format
 
 ```
 challenges/<name>/
-├── challenge.md     # description, free-form. Optional YAML frontmatter.
+├── challenge.md     # description (free-form), optional YAML frontmatter
 └── <files…>         # binaries, ciphertext, pcaps, etc.
 ```
 
-Every file in the challenge dir is copied verbatim into the per-run workdir before the agent starts. The agent is told (via the prompt + `AGENTS.md`) to terminate its final message with:
+The agent is told to terminate its final message with `FLAG: <value>` (or `FLAG: NOT_FOUND`). The harness scans the **last assistant message** for that line. The flag value is recorded as-is — verify against the canonical flag in `result.json` if needed.
 
-```
-FLAG: <exact flag>
-```
+## Methodology (`AGENTS.md`)
 
-…or `FLAG: NOT_FOUND` if it gives up. The harness scans the **last assistant message** for a line matching `^FLAG:\s*(.+)$` (last match wins). Flag value is recorded as-is — no canonical-flag verification, you can post-hoc check `result.json`.
+`templates/AGENTS.md` ships a generic CTF methodology (recon → classify → exploit → flag → contract). It is **prepended to the prompt**, so every runner receives the same instructions regardless of how each CLI handles its own conventions. `--no-agents` disables it; `--agents PATH` swaps in a custom one.
 
-## Model configuration
+## Cost: synthetic vs native
 
-Edit `models.yaml`. Each entry:
+Every run records two costs:
+
+- `cost_usd_synthetic` — `tokens × pricing` from `models.yaml`, always populated. Use this to compare across models, including those running on flat-rate OAuth subscriptions.
+- `cost_usd_native` — what the runner itself reports. `claude_code` exposes `total_cost_usd`; `opencode` exposes `info.cost`; `codex` doesn't report cost (always `$0`).
+
+## Models config schema
 
 ```yaml
-- name: claude-sonnet-4-6              # display name (free-form)
-  opencode_model: anthropic/claude-sonnet-4-5   # what `opencode --model` expects
-  variant: high                        # optional reasoning effort
-  pricing:                             # USD per million tokens, public API rates
-    input: 3.00
-    output: 15.00
-    cache_read: 0.30                   # optional, defaults to 0
-    cache_write: 3.75                  # optional, defaults to 0
+- name: <free-form display name>
+  runner: opencode | claude_code | codex
+  pricing:
+    input: <USD per Mtok>           # required
+    output: <USD per Mtok>          # required
+    cache_read: <USD per Mtok>      # optional, default 0
+    cache_write: <USD per Mtok>     # optional, default 0
+    reasoning: <USD per Mtok>       # optional, defaults to output
+
+  # runner=opencode:
+  opencode_model: provider/model    # e.g. anthropic/claude-sonnet-4-5
+  variant: high                     # optional, opencode --variant
+
+  # runner=claude_code:
+  claude_model: opus                # alias or full id
+  claude_args: [--max-turns, "100"] # optional, extra args passed to claude
+
+  # runner=codex:
+  codex_model: gpt-5.5
+  codex_args: ["-c", "model_reasoning_effort=high"]   # optional
 ```
 
-`opencode_model` must match a model that `opencode models` lists for an authenticated provider. Run `opencode models` to confirm what's available.
-
-### Synthetic cost vs opencode-reported cost
-
-Two costs are recorded:
-
-- **`cost_usd_synthetic`** — `tokens × pricing` from `models.yaml`. Always populated. Use this to compare models on equal footing, including those on flat-rate subscriptions.
-- **`cost_usd_opencode`** — what `opencode export` reports. Often `$0` for OAuth/subscription providers.
-
-If you want a more sophisticated cost model (cached vs uncached input tokens priced differently, reasoning tokens, etc.), edit the `compute_synthetic_cost` function in `bench.py`.
-
-## With / without skills (AGENTS.md toggle)
-
-The repo ships a generic CTF methodology in `templates/AGENTS.md` (recon → classify → exploit → flag → format contract). It's copied into the workdir for each run by default; opencode auto-loads any `AGENTS.md` it finds.
-
-- `python bench.py --challenge X`              → with `templates/AGENTS.md`
-- `python bench.py --challenge X --agents path/to/custom.md`  → with custom methodology
-- `python bench.py --challenge X --no-agents`  → baseline, no methodology injected
-
-This is the project's "with skills / without skills" axis. Discovery-driven skill systems (e.g. Claude Code's `~/.claude/skills`) are **not** auto-mounted because opencode lacks an equivalent triggering mechanism — you'd be comparing apples to oranges. If you want to test specific skills, concatenate their contents into a custom `AGENTS.md` and pass it via `--agents`.
+Tokens are normalized across runners to non-overlapping buckets (`input` is fresh-only, `cache_read` is cached input, etc.) so the synthetic-cost formula stays consistent regardless of where the data came from.
 
 ## Limitations
 
-- No Docker. Each run uses a fresh tmp-style directory but trusts the host. Don't run untrusted CTF challenges, especially pwn binaries, without your own sandboxing.
-- Sequential, not parallel. Avoids OAuth rate limits and produces deterministic reports; takes longer.
-- Flag value is **self-reported** by the agent. The harness doesn't know the canonical flag unless you tell it (post-hoc verify against `result.json`).
-- `opencode export` is the source of truth for tokens/cost. If opencode's schema changes, parsing in `aggregate_session()` may need updating.
-- `--variant` is provider-specific; some providers will error out if you pass it. Omit `variant:` from `models.yaml` for those.
-
-## Project layout
-
-```
-bench.py                 # the orchestrator, single file
-templates/AGENTS.md      # default CTF methodology
-models.yaml.example      # model config template
-challenges/example-easy/ # sanity-check challenge (base64 + 1-byte XOR)
-runs/                    # output root (gitignored)
-requirements.txt
-```
-
-## License
-
-MIT (add a `LICENSE` file when creating the GitHub repo).
+- No Docker. Each run uses an isolated working directory but trusts the host. Don't run untrusted CTF challenges (esp. pwn) without your own sandboxing.
+- Sequential, not parallel. Avoids OAuth rate-limit collisions and keeps reports deterministic.
+- Flag is **self-reported**. The harness doesn't know the canonical flag unless you supply it.
+- `claude_code` and `codex` runners load their own global config files; `opencode` doesn't. When comparing across runners you're comparing full stacks, not bare models.

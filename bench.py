@@ -166,10 +166,12 @@ def build_run(model: ModelCfg, workdir: Path, prompt: str, title: str) -> RunArt
         return RunArtifacts(cmd=cmd, cwd=None)
 
     if model.runner == "claude_code":
+        # stream-json so partial events survive a timeout-kill (json buffers until end).
         cmd = [
             "claude",
             "-p", prompt,
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--verbose",
             "--model", model.claude_model,
             "--dangerously-skip-permissions",
         ]
@@ -265,27 +267,54 @@ def parse_opencode(stdout_path: Path, _stderr_path: Path) -> tuple[str | None, d
 
 
 def parse_claude_code(stdout_path: Path, _stderr_path: Path) -> tuple[str | None, dict, float, str]:
-    if not stdout_path.exists():
-        return None, dict(EMPTY_TOKENS), 0.0, ""
-    raw = stdout_path.read_text().strip()
-    if not raw:
-        return None, dict(EMPTY_TOKENS), 0.0, ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None, dict(EMPTY_TOKENS), 0.0, ""
-    sid = data.get("session_id")
-    usage = data.get("usage") or {}
-    tokens = {
-        "input": int(usage.get("input_tokens", 0) or 0),
-        "output": int(usage.get("output_tokens", 0) or 0),
-        "reasoning": 0,
-        "cache_read": int(usage.get("cache_read_input_tokens", 0) or 0),
-        "cache_write": int(usage.get("cache_creation_input_tokens", 0) or 0),
-    }
-    cost = float(data.get("total_cost_usd", 0) or 0)
-    final_text = data.get("result") or ""
-    return sid, tokens, cost, final_text
+    """Parse claude --output-format=stream-json output.
+
+    Resilient to mid-run termination: prefers the final `result` event when present
+    (authoritative tokens + native cost) and falls back to summed `assistant` events
+    plus the last assistant text otherwise.
+    """
+    sid = None
+    summed = dict(EMPTY_TOKENS)
+    last_assistant_text = ""
+    final_event: dict | None = None
+
+    for ev in _read_jsonl(stdout_path):
+        t = ev.get("type")
+        if t == "system" and ev.get("subtype") == "init":
+            sid = ev.get("session_id") or sid
+        elif t == "assistant":
+            sid = ev.get("session_id") or sid
+            msg = ev.get("message") or {}
+            u = msg.get("usage") or {}
+            summed["input"] += int(u.get("input_tokens", 0) or 0)
+            summed["output"] += int(u.get("output_tokens", 0) or 0)
+            summed["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
+            summed["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
+            content = msg.get("content") or []
+            txt = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+            if txt:
+                last_assistant_text = txt
+        elif t == "result":
+            final_event = ev
+
+    if final_event is not None:
+        usage = final_event.get("usage") or {}
+        tokens = {
+            "input": int(usage.get("input_tokens", 0) or 0),
+            "output": int(usage.get("output_tokens", 0) or 0),
+            "reasoning": 0,
+            "cache_read": int(usage.get("cache_read_input_tokens", 0) or 0),
+            "cache_write": int(usage.get("cache_creation_input_tokens", 0) or 0),
+        }
+        cost_native = float(final_event.get("total_cost_usd", 0) or 0)
+        final_text = final_event.get("result") or last_assistant_text
+        sid = final_event.get("session_id") or sid
+    else:
+        # Killed mid-run — use whatever assistant events made it to stdout.
+        tokens = summed
+        cost_native = 0.0
+        final_text = last_assistant_text
+    return sid, tokens, cost_native, final_text
 
 
 def parse_codex(stdout_path: Path, stderr_path: Path) -> tuple[str | None, dict, float, str]:
