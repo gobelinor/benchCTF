@@ -20,14 +20,15 @@ defaults:
 
 models:
   # ---- Anthropic via Claude Code OAuth (no API key needed) ----
+  # Public API rates as of 2026-04-28. Cache write = 5-minute TTL (1.25× input).
   - name: claude-opus-4-7
     runner: claude_code
     claude_model: opus
     pricing:
-      input: 15.00
-      output: 75.00
-      cache_read: 1.50
-      cache_write: 18.75
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
 
   - name: claude-sonnet-4-6
     runner: claude_code
@@ -44,14 +45,13 @@ models:
     codex_model: gpt-5.5
     pricing:
       input: 5.00
-      output: 20.00
+      output: 30.00
       cache_read: 0.50
 
   # ---- Anything authenticated via opencode (API key or its own OAuth) ----
   - name: opencode-claude-sonnet-4-6
     runner: opencode
-    opencode_model: anthropic/claude-sonnet-4-5
-    variant: high
+    opencode_model: anthropic/claude-sonnet-4-6
     pricing:
       input: 3.00
       output: 15.00
@@ -64,10 +64,12 @@ models:
     pricing:
       input: 1.25
       output: 10.00
+      cache_read: 0.125
 
-  - name: opencode-copilot-gpt-5
+  - name: opencode-gpt-5
     runner: opencode
-    opencode_model: github-copilot/gpt-5
+    opencode_model: openai/gpt-5
     pricing:
-      input: 1.25
-      output: 10.00
+      input: 0.625
+      output: 5.00
+      cache_read: 0.0625

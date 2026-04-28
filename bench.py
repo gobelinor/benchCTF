@@ -581,9 +581,11 @@ def write_report(path: Path, runs: list[dict], aggs: dict[str, dict], cfg: dict)
              "Use this column to compare models on equal footing when some run via OAuth subscriptions.")
     L.append("- Native cost is what each runner reports (claude_code: `total_cost_usd`; "
              "opencode: `info.cost` from `opencode export`; codex: not reported, always 0).")
-    L.append("- `claude_code` and `codex` runners load their own global config files "
-             "(~/.claude/CLAUDE.md, ~/.codex/AGENTS.md). The opencode runner does not. "
-             "This biases the comparison; --bare/equivalent flags trade OAuth for purity.")
+    L.append("- **None of the runners are context-clean.** Each one auto-loads ambient host config "
+             "(claude_code: ~/.claude/CLAUDE.md + ~/.claude/skills/*; codex: ~/.codex/AGENTS.md + skills; "
+             "opencode: walks up parent dirs for AGENTS.md/CLAUDE.md AND auto-loads ~/.claude/CLAUDE.md "
+             "+ ~/.claude/skills/* + ~/.agents/skills/*). Cross-runner comparisons are full-stack, "
+             "not bare-model.")
     path.write_text("\n".join(L) + "\n")
 
 
@@ -613,6 +615,56 @@ def print_summary_table(console: Console, aggs: dict[str, dict]) -> None:
             f"${a['cost_native']['median']:.4f}",
         )
     console.print(table)
+
+
+def _idx_field_width(total: int) -> int:
+    return max(3, 2 * len(str(total)) + 1)
+
+
+def _print_run_header(console: Console, total: int) -> None:
+    """Column header matching _print_run_line."""
+    iw = _idx_field_width(total)
+    console.print(
+        f"  [dim]{'run':<{iw}}[/dim]  "
+        f"[dim]{'status':<12}[/dim]"
+        f"[dim]{'wall':>8}[/dim]   "
+        f"[dim]{'input':>6} → {'output':<6}[/dim]   "
+        f"[dim]{'cached':>7}[/dim]   "
+        f"[dim]{'$synth':>7}[/dim]   "
+        f"[dim]flag[/dim]"
+    )
+
+
+def _print_run_line(console: Console, r: dict, idx: int, total: int) -> None:
+    """One compact line per finished run.
+
+    `input` and `cached` are normalized across runners to the same meaning:
+      input  = fresh (uncached) input tokens billed at full input rate
+      cached = input tokens that hit the prompt cache (read)
+    """
+    if r["flag_found"]:
+        color, icon = "green", "✓"
+    elif r["exit_status"] == "timeout":
+        color, icon = "yellow", "✗"
+    else:
+        color, icon = "red", "✗"
+    status_word = "ok" if r["flag_found"] else r["exit_status"]
+    flag_part = (
+        f"[green]{r['flag_value']}[/green]" if r["flag_found"]
+        else "[dim]—[/dim]"
+    )
+    iw = _idx_field_width(total)
+    idx_str = f"{idx}/{total}"
+    console.print(
+        f"  [dim]{idx_str:<{iw}}[/dim]  "
+        f"[{color}]{icon} {status_word:<10s}[/{color}]"
+        f"[bold]{format_seconds(r['wall_seconds']):>8s}[/bold]   "
+        f"{format_compact(r['tokens']['input']):>6s} [dim]→[/dim] "
+        f"{format_compact(r['tokens']['output']):<6s}   "
+        f"{format_compact(r['tokens']['cache_read']):>7s}   "
+        f"[dim]$[/dim]{r['cost_usd_synthetic']:>6.3f}   "
+        f"{flag_part}"
+    )
 
 
 # ---------- main ----------
@@ -689,6 +741,12 @@ def main() -> int:
     console.print(f"  agents.md : {agents_path or '[dim](disabled)[/dim]'}")
     console.print(f"  timeout   : {timeout}s/run")
     console.print(f"  out       : {out_root}")
+    console.print()
+    console.print(
+        "  [yellow]ⓘ[/yellow] [italic dim]benchmarking the full stack — each runner inherits its "
+        "host context (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, skills, "
+        "walked-up AGENTS.md/CLAUDE.md). See README → Limitations.[/italic dim]"
+    )
 
     if any(m.runner == "opencode" for m in models):
         try:
@@ -704,11 +762,17 @@ def main() -> int:
     all_results: list[dict] = []
     for model in models:
         model_root = out_root / slugify(model.name)
+        console.print()
+        console.rule(
+            f"[bold cyan]{model.name}[/bold cyan]  [dim]·[/dim]  "
+            f"[magenta]{model.runner}[/magenta]  [dim]·[/dim]  "
+            f"[dim]{runs_n} run{'s' if runs_n > 1 else ''}[/dim]",
+            style="cyan", align="left",
+        )
+        _print_run_header(console, runs_n)
         for i in range(1, runs_n + 1):
             run_dir = model_root / f"run-{i}"
             run_dir.mkdir(parents=True)
-            console.print(f"[bold]{model.name}[/bold] (runner=[magenta]{model.runner}[/magenta]) "
-                          f"run {i}/{runs_n} …")
             try:
                 r = run_one(model, challenge_dir, run_dir, methodology, timeout, i, ts)
             except KeyboardInterrupt:
@@ -720,16 +784,7 @@ def main() -> int:
                                   error=f"{type(e).__name__}: {e}")
             (run_dir / "result.json").write_text(json.dumps(r, indent=2))
             all_results.append(r)
-            tag = "[green]✓[/green]" if r["flag_found"] else "[red]✗[/red]"
-            console.print(
-                f"  {tag} {r['exit_status']:18s} "
-                f"{format_seconds(r['wall_seconds']):>10s}  "
-                f"in={format_compact(r['tokens']['input']):>7s} "
-                f"out={format_compact(r['tokens']['output']):>7s}  "
-                f"$synth={r['cost_usd_synthetic']:.4f} "
-                f"$native={r['cost_usd_native']:.4f}"
-                + (f"  flag=[green]{r['flag_value']}[/green]" if r["flag_found"] else "")
-            )
+            _print_run_line(console, r, i, runs_n)
 
     aggs = aggregate(all_results)
     report_path = out_root / "report.md"

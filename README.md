@@ -1,8 +1,12 @@
 # benchCTF
 
-Benchmark AI models on agentic CTF challenges.
+Benchmark AI agents on CTF challenges.
 
-A small Python harness that runs the same challenge against multiple (orchestrator, model) pairs in isolated working directories, then reports tokens, time, success rate, and a synthetic dollar cost so different billing models can be compared on equal footing.
+![Claude Code Opus 4.7 vs Codex GPT-5.5 on the CryptoHack `lets-decrypt` challenge, 5 runs each](screen-codex-claude.png)
+
+You give benchCTF a challenge directory (a `challenge.md` plus any binaries, ciphertext, source files) and a list of models. Each model runs autonomously in its own fresh working directory under the same prompt and methodology — it reads the files, writes scripts, runs commands, talks to remote services, and reports back the flag it found.
+
+The output is a markdown report comparing every model on: wall time, tokens consumed, success rate, and a synthetic dollar cost (token counts × public API rates) so subscription-based stacks like Claude Code or Codex can be compared on the same axis as pay-per-token APIs.
 
 ## Modular by design
 
@@ -68,18 +72,18 @@ defaults:
 models:
   - name: opencode-claude-sonnet-4-6
     runner: opencode
-    opencode_model: anthropic/claude-sonnet-4-5
+    opencode_model: anthropic/claude-sonnet-4-6
     pricing: { input: 3.00, output: 15.00, cache_read: 0.30, cache_write: 3.75 }
 
   - name: opencode-gpt-5
     runner: opencode
     opencode_model: openai/gpt-5
-    pricing: { input: 1.25, output: 10.00 }
+    pricing: { input: 0.625, output: 5.00, cache_read: 0.0625 }
 
   - name: opencode-gemini-2.5-pro
     runner: opencode
     opencode_model: google/gemini-2.5-pro
-    pricing: { input: 1.25, output: 10.00 }
+    pricing: { input: 1.25, output: 10.00, cache_read: 0.125 }
 ```
 
 Same harness, same prompt, same workdir layout — only the model varies.
@@ -97,15 +101,15 @@ models:
   - name: claude-opus-4-7
     runner: claude_code        # uses Claude Code's OAuth
     claude_model: opus
-    pricing: { input: 15.00, output: 75.00, cache_read: 1.50, cache_write: 18.75 }
+    pricing: { input: 5.00, output: 25.00, cache_read: 0.50, cache_write: 6.25 }
 
   - name: codex-gpt-5.5
     runner: codex              # uses Codex's ChatGPT OAuth
     codex_model: gpt-5.5
-    pricing: { input: 5.00, output: 20.00, cache_read: 0.50 }
+    pricing: { input: 5.00, output: 30.00, cache_read: 0.50 }
 ```
 
-This compares two real-world stacks (CLI + model + ambient config). Note: Claude Code and Codex each load their own global config (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`); opencode does not. That's part of what you're benchmarking when you compare full stacks.
+This compares two real-world stacks (CLI + model + ambient config). All three runners load some ambient host context — see the limitations section for the specifics. That's part of what you're benchmarking when you compare full stacks.
 
 ## Output
 
@@ -145,6 +149,8 @@ Every run records two costs:
 - `cost_usd_synthetic` — `tokens × pricing` from `models.yaml`, always populated. Use this to compare across models, including those running on flat-rate OAuth subscriptions.
 - `cost_usd_native` — what the runner itself reports. `claude_code` exposes `total_cost_usd`; `opencode` exposes `info.cost`; `codex` doesn't report cost (always `$0`).
 
+> Pricing in `models.yaml.example` is the public API rate as of **2026-04-28**. Re-check before running long benchmarks if rates may have shifted.
+
 ## Models config schema
 
 ```yaml
@@ -177,4 +183,9 @@ Tokens are normalized across runners to non-overlapping buckets (`input` is fres
 - No Docker. Each run uses an isolated working directory but trusts the host. Don't run untrusted CTF challenges (esp. pwn) without your own sandboxing.
 - Sequential, not parallel. Avoids OAuth rate-limit collisions and keeps reports deterministic.
 - Flag is **self-reported**. The harness doesn't know the canonical flag unless you supply it.
-- `claude_code` and `codex` runners load their own global config files; `opencode` doesn't. When comparing across runners you're comparing full stacks, not bare models.
+- **None of the runners are context-clean.** Each one auto-loads ambient host config:
+  - `claude_code` → `~/.claude/CLAUDE.md`, `~/.claude/skills/*`, hooks, plugins, settings.
+  - `codex` → `~/.codex/AGENTS.md`, `~/.codex/skills/*`, `~/.codex/config.toml`.
+  - `opencode` → walks up the workdir's parent chain for `AGENTS.md` / `CLAUDE.md`, **and** auto-loads `~/.claude/CLAUDE.md` plus skills from `~/.claude/skills/` and `~/.agents/skills/`.
+
+  When you compare across runners you're comparing full stacks, not bare models. To get closer to a clean comparison, run with stripped-down host config (move/rename your global rules and skill dirs out of the way before benchmarking), or stay within a single runner and only vary the model.
