@@ -79,20 +79,33 @@ defaults:
   runs: 3
 
 models:
-  - name: opencode-claude-sonnet-4-6
+  - name: opencode-claude-opus-4-7-max
     runner: opencode
-    opencode_model: anthropic/claude-sonnet-4-6
-    pricing: { input: 3.00, output: 15.00, cache_read: 0.30, cache_write: 3.75 }
+    opencode_model: anthropic/claude-opus-4-7
+    variant: max
+    pricing:
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
 
-  - name: opencode-gpt-5
+  - name: opencode-gpt-5-5-pro-xhigh
     runner: opencode
-    opencode_model: openai/gpt-5
-    pricing: { input: 0.625, output: 5.00, cache_read: 0.0625 }
+    opencode_model: openai/gpt-5.5-pro
+    variant: xhigh
+    pricing:
+      input: 15.00
+      output: 120.00
+      cache_read: 1.50
 
-  - name: opencode-gemini-2.5-pro
+  - name: opencode-gemini-2-5-pro
     runner: opencode
     opencode_model: google/gemini-2.5-pro
-    pricing: { input: 1.25, output: 10.00, cache_read: 0.125 }
+    pricing:
+      input: 1.25
+      output: 10.00
+      cache_read: 0.125
+
 ```
 
 Same harness, same prompt, same workdir layout — only the model varies.
@@ -107,14 +120,16 @@ defaults:
   runs: 1
 
 models:
-  - name: claude-opus-4-7
-    runner: claude_code        # uses Claude Code's OAuth
-    claude_model: opus
+  - name: claude-opus-4-7-max
+    runner: claude_code        
+    claude_model: claude-opus-4-7
+    claude_args: ["--effort", "max"]
     pricing: { input: 5.00, output: 25.00, cache_read: 0.50, cache_write: 6.25 }
 
-  - name: codex-gpt-5.5
-    runner: codex              # uses Codex's ChatGPT OAuth
+  - name: codex-gpt-5.5-xhigh
+    runner: codex              
     codex_model: gpt-5.5
+    codex_args: ["-c", "model_reasoning_effort=xhigh"]
     pricing: { input: 5.00, output: 30.00, cache_read: 0.50 }
 ```
 
