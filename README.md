@@ -23,6 +23,15 @@ You can mix freely:
 - **Pure model comparison** — same orchestrator (e.g. `opencode`), several models, only the model varies.
 - **Cross-stack comparison** — different orchestrators, e.g. Claude Code vs Codex vs opencode-with-Gemini, end-to-end stacks compared as black boxes.
 
+## Run this in a VM
+
+> ⚠️ Strongly recommended: run benchCTF inside a disposable VM.
+>
+> Two reasons:
+>
+> 1. **No sandbox, no permissions prompt.** Every runner is launched with its "yolo" flag (`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`). The agent has full shell access, can install packages, hit the network, write anywhere under your user. Pwn challenges in particular run untrusted attacker-controlled binaries — don't do that on your laptop.
+> 2. **Cleaner comparison.** A fresh VM has no `~/.claude/CLAUDE.md`, no skills, no `~/.codex/AGENTS.md`, no walked-up `AGENTS.md` — none of the host context that biases each runner (see Limitations). 
+
 ## Install
 
 Requirements:

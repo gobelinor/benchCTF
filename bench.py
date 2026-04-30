@@ -333,8 +333,12 @@ def parse_codex(stdout_path: Path, stderr_path: Path) -> tuple[str | None, dict,
             fresh = max(0, input_total - cached)
             tokens["input"] += fresh
             tokens["cache_read"] += cached
-            tokens["output"] += int(u.get("output_tokens", 0) or 0)
-            tokens["reasoning"] += int(u.get("reasoning_output_tokens", 0) or 0)
+            output_total = int(u.get("output_tokens", 0) or 0)
+            reasoning = int(u.get("reasoning_output_tokens", 0) or 0)
+            # OpenAI semantics: output_tokens includes reasoning_output_tokens; split for pricing parity.
+            visible_output = max(0, output_total - reasoning)
+            tokens["output"] += visible_output
+            tokens["reasoning"] += reasoning
         elif t == "item.completed":
             item = ev.get("item") or {}
             if item.get("type") == "agent_message":

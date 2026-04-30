@@ -3,27 +3,48 @@
 # Each entry picks a `runner` (the CLI that drives the agent loop):
 #
 #   runner: opencode      → invokes `opencode run --format json` (any provider authed in opencode)
-#   runner: claude_code   → invokes `claude -p --output-format json`   (uses Claude Code's OAuth)
-#   runner: codex         → invokes `codex exec --json`               (uses Codex's ChatGPT OAuth)
+#   runner: claude_code   → invokes `claude -p --output-format stream-json --verbose` (uses Claude Code's OAuth)
+#   runner: codex         → invokes `codex exec --json`                                (uses Codex's ChatGPT OAuth)
 #
 # Pricing is in USD per million tokens (public API rates) and powers the synthetic
 # cost column. Tokens accounting is normalized across runners so:
 #   pricing.input        applies to fresh input tokens (excluding cached)
-#   pricing.output       applies to output tokens
-#   pricing.cache_read   applies to cached input tokens (default 0 if omitted)
-#   pricing.cache_write  applies to cache-creation tokens (default 0 if omitted)
-#   pricing.reasoning    applies to reasoning tokens (defaults to pricing.output)
+#   pricing.output       applies to output tokens (visible only — reasoning is split out)
+#   pricing.cache_read   applies to cached input tokens                         (default 0)
+#   pricing.cache_write  applies to cache-creation tokens (Anthropic only)      (default 0)
+#   pricing.reasoning    applies to reasoning tokens                            (defaults to pricing.output)
+#
+# Note on cache_write: Anthropic charges separately for caching a prefix (~1.25× input
+# at 5-min TTL). OpenAI doesn't — cache writes are free, only cache reads are billed.
+# So `cache_write` only appears under Anthropic-backed entries.
+#
+# Reasoning effort knobs (top-effort variants shown below):
+#   claude_code → claude_args: ["--effort", "max"]                # low|medium|high|xhigh|max
+#   codex       → codex_args: ["-c", "model_reasoning_effort=xhigh"]
+#   opencode    → variant: max                                    # provider-specific (high|max|xhigh|minimal|...)
 
 defaults:
   timeout_seconds: 1800   # 30 min/run
   runs: 3
 
 models:
-  # ---- Anthropic via Claude Code OAuth (no API key needed) ----
-  # Public API rates as of 2026-04-28. Cache write = 5-minute TTL (1.25× input).
+  # ============================================================================
+  # Anthropic via Claude Code OAuth (no API key needed; uses Claude Pro/Max/Team)
+  # Public API rates as of 2026-05-01. Cache write = 5-minute TTL (1.25× input).
+  # ============================================================================
   - name: claude-opus-4-7
     runner: claude_code
-    claude_model: opus
+    claude_model: claude-opus-4-7        # pin the version (alias `opus` shifts when a new model ships)
+    pricing:
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
+
+  - name: claude-opus-4-7-max-effort
+    runner: claude_code
+    claude_model: claude-opus-4-7
+    claude_args: ["--effort", "max"]     # extended thinking with maximum budget
     pricing:
       input: 5.00
       output: 25.00
@@ -32,15 +53,26 @@ models:
 
   - name: claude-sonnet-4-6
     runner: claude_code
-    claude_model: sonnet
+    claude_model: claude-sonnet-4-6
     pricing:
       input: 3.00
       output: 15.00
       cache_read: 0.30
       cache_write: 3.75
 
-  # ---- OpenAI via Codex (ChatGPT) OAuth ----
-  - name: codex-gpt-5.5
+  - name: claude-haiku-4-5
+    runner: claude_code
+    claude_model: claude-haiku-4-5
+    pricing:
+      input: 1.00
+      output: 5.00
+      cache_read: 0.10
+      cache_write: 1.25
+
+  # ============================================================================
+  # OpenAI via Codex (ChatGPT) OAuth — uses Plus/Pro subscription
+  # ============================================================================
+  - name: codex-gpt-5-5
     runner: codex
     codex_model: gpt-5.5
     pricing:
@@ -48,7 +80,29 @@ models:
       output: 30.00
       cache_read: 0.50
 
-  # ---- Anything authenticated via opencode (API key or its own OAuth) ----
+  - name: codex-gpt-5-5-xhigh
+    runner: codex
+    codex_model: gpt-5.5
+    codex_args: ["-c", "model_reasoning_effort=xhigh"]   # max reasoning effort
+    pricing:
+      input: 5.00
+      output: 30.00
+      cache_read: 0.50
+
+  # ============================================================================
+  # Anything authenticated via opencode (API key or opencode's own OAuth)
+  # opencode bridges providers — same harness, different model under the hood.
+  # ============================================================================
+  - name: opencode-claude-opus-4-7-max
+    runner: opencode
+    opencode_model: anthropic/claude-opus-4-7
+    variant: max
+    pricing:
+      input: 5.00
+      output: 25.00
+      cache_read: 0.50
+      cache_write: 6.25
+
   - name: opencode-claude-sonnet-4-6
     runner: opencode
     opencode_model: anthropic/claude-sonnet-4-6
@@ -58,13 +112,16 @@ models:
       cache_read: 0.30
       cache_write: 3.75
 
-  - name: opencode-gemini-2.5-pro
+  - name: opencode-gpt-5-5-pro-xhigh
     runner: opencode
-    opencode_model: google/gemini-2.5-pro
+    opencode_model: openai/gpt-5.5-pro
+    variant: xhigh
+    # Note: opencode + OpenAI doesn't engage prompt caching → expect $native ≫ $synth.
+    # For a fair OpenAI bench, prefer `runner: codex` (caching works natively).
     pricing:
-      input: 1.25
-      output: 10.00
-      cache_read: 0.125
+      input: 15.00
+      output: 120.00
+      cache_read: 1.50
 
   - name: opencode-gpt-5
     runner: opencode
@@ -73,3 +130,11 @@ models:
       input: 0.625
       output: 5.00
       cache_read: 0.0625
+
+  - name: opencode-gemini-2-5-pro
+    runner: opencode
+    opencode_model: google/gemini-2.5-pro
+    pricing:
+      input: 1.25
+      output: 10.00
+      cache_read: 0.125
