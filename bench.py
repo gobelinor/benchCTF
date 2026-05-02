@@ -232,6 +232,39 @@ def export_opencode_session(session_id: str, timeout: int = 30) -> dict | None:
         return None
 
 
+def _parse_opencode_stdout(stdout_path: Path) -> tuple[dict, float, str]:
+    """Reconstruct tokens/cost/final-text directly from opencode stdout JSONL.
+
+    Used as a fallback when `opencode export` is unavailable or returns
+    malformed JSON (large tool outputs sometimes break its serializer).
+    """
+    tokens = dict(EMPTY_TOKENS)
+    cost = 0.0
+    final_text = ""
+    last_text = ""
+    for ev in _read_jsonl(stdout_path):
+        t = ev.get("type")
+        part = ev.get("part") or {}
+        if t == "step_finish":
+            tk = part.get("tokens") or {}
+            tokens["input"] += int(tk.get("input", 0) or 0)
+            tokens["output"] += int(tk.get("output", 0) or 0)
+            tokens["reasoning"] += int(tk.get("reasoning", 0) or 0)
+            cache = tk.get("cache") or {}
+            tokens["cache_read"] += int(cache.get("read", 0) or 0)
+            tokens["cache_write"] += int(cache.get("write", 0) or 0)
+            cost += float(part.get("cost", 0) or 0)
+        elif t == "text":
+            txt = part.get("text") or ""
+            if not txt:
+                continue
+            last_text = txt
+            phase = ((part.get("metadata") or {}).get("openai") or {}).get("phase")
+            if phase == "final_answer":
+                final_text = txt
+    return tokens, cost, (final_text or last_text)
+
+
 def parse_opencode(stdout_path: Path, _stderr_path: Path) -> tuple[str | None, dict, float, str]:
     sid = None
     for ev in _read_jsonl(stdout_path):
@@ -263,6 +296,17 @@ def parse_opencode(stdout_path: Path, _stderr_path: Path) -> tuple[str | None, d
                 )
                 if msg_text:
                     final_text = msg_text
+    # Fallback: if export was missing or incomplete (e.g. JSON serializer
+    # choked on a large tool output), reconstruct from the live stdout
+    # stream — events for tokens (`step_finish`) and assistant text are
+    # already there, no extra IPC needed.
+    if not final_text or sum(tokens.values()) == 0:
+        fb_tokens, fb_cost, fb_text = _parse_opencode_stdout(stdout_path)
+        if sum(tokens.values()) == 0:
+            tokens = fb_tokens
+            cost = fb_cost
+        if not final_text:
+            final_text = fb_text
     return sid, tokens, cost, final_text
 
 
@@ -353,6 +397,60 @@ PARSERS = {
     "claude_code": parse_claude_code,
     "codex": parse_codex,
 }
+
+
+# ---------- stderr diagnostics ----------
+
+# Pattern -> short human label. Order matters: most specific first.
+STDERR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"dangerously-skip-permissions cannot be used with root", re.I),
+     "claude CLI refuses --dangerously-skip-permissions as root — run as non-root user"),
+    (re.compile(r"(credit balance (is )?too low|insufficient[_ ](?:credit|quota|funds|balance)"
+                r"|out of credits|payment[_ ]required|billing[_ ]hard[_ ]limit)", re.I),
+     "API credit / billing exhausted"),
+    (re.compile(r"(rate[_ ]?limit|429|too many requests)", re.I),
+     "rate limited by provider"),
+    (re.compile(r"(401|403|unauthorized|invalid[_ ]api[_ ]key|authentication[_ ]error"
+                r"|not authenticated|please (re)?login|token (has )?expired)", re.I),
+     "auth failed — re-login or check API key"),
+    (re.compile(r"(model[_ ]not[_ ]found|unknown model|model .*does not exist|invalid model"
+                r"|no such model)", re.I),
+     "unknown / unavailable model id"),
+    (re.compile(r"(ENOTFOUND|ECONNREFUSED|getaddrinfo|network is unreachable"
+                r"|timed? out connecting|connection reset)", re.I),
+     "network error reaching provider"),
+    (re.compile(r"command not found|No such file or directory", re.I),
+     "runner binary missing from PATH"),
+    (re.compile(r"context length exceeded|maximum context length|prompt is too long", re.I),
+     "context length exceeded"),
+]
+
+
+def summarize_stderr(stderr_path: Path, max_chars: int = 160) -> str | None:
+    """Return a short, human-readable hint for a failed run, or None.
+
+    Tries known patterns first (root-permission refusal, credit/auth/model
+    errors, network glitches), falls back to the last non-empty stderr line
+    truncated. Used purely for display; never affects exit_status.
+    """
+    if not stderr_path.exists():
+        return None
+    try:
+        text = stderr_path.read_text(errors="replace").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    for rx, label in STDERR_PATTERNS:
+        if rx.search(text):
+            return label
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    snippet = lines[-1]
+    if len(snippet) > max_chars:
+        snippet = snippet[: max_chars - 1] + "…"
+    return snippet
 
 
 # ---------- common per-run logic ----------
@@ -451,6 +549,8 @@ def run_one(model: ModelCfg, challenge_dir: Path, run_dir: Path,
     if exit_status == "ok" and not flag_found and not final_text:
         exit_status = "no_flag_emitted"
 
+    error_hint = None if flag_found else summarize_stderr(stderr_path)
+
     return {
         "model": model.name,
         "runner": model.runner,
@@ -464,6 +564,7 @@ def run_one(model: ModelCfg, challenge_dir: Path, run_dir: Path,
         "flag_found": flag_found,
         "flag_value": flag_value,
         "exit_status": exit_status,
+        "error_hint": error_hint,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -485,6 +586,7 @@ def _empty_result(model: ModelCfg, challenge_dir: Path, run_index: int,
         "flag_found": False,
         "flag_value": None,
         "exit_status": exit_status,
+        "error_hint": error,
         "stdout_path": str(run_dir / "stdout.jsonl"),
         "stderr_path": str(run_dir / "stderr.log"),
     }
@@ -669,6 +771,11 @@ def _print_run_line(console: Console, r: dict, idx: int, total: int) -> None:
         f"[dim]$[/dim]{r['cost_usd_synthetic']:>6.3f}   "
         f"{flag_part}"
     )
+    # Surface the failure cause one indented line below — only on failures,
+    # so the happy path stays visually clean.
+    hint = r.get("error_hint")
+    if hint and not r["flag_found"]:
+        console.print(f"  {' ':<{iw}}  [yellow dim]↳ {hint}[/yellow dim]")
 
 
 # ---------- main ----------
