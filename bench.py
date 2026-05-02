@@ -402,16 +402,20 @@ PARSERS = {
 # ---------- stderr diagnostics ----------
 
 # Pattern -> short human label. Order matters: most specific first.
-STDERR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+# Applied to stderr AND to runner-reported error text in stdout.jsonl.
+ERROR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"dangerously-skip-permissions cannot be used with root", re.I),
      "claude CLI refuses --dangerously-skip-permissions as root — run as non-root user"),
+    (re.compile(r"not logged in|please run /login|run `?/login`?", re.I),
+     "claude CLI not logged in — run `claude` then `/login`"),
     (re.compile(r"(credit balance (is )?too low|insufficient[_ ](?:credit|quota|funds|balance)"
                 r"|out of credits|payment[_ ]required|billing[_ ]hard[_ ]limit)", re.I),
      "API credit / billing exhausted"),
     (re.compile(r"(rate[_ ]?limit|429|too many requests)", re.I),
      "rate limited by provider"),
-    (re.compile(r"(401|403|unauthorized|invalid[_ ]api[_ ]key|authentication[_ ]error"
-                r"|not authenticated|please (re)?login|token (has )?expired)", re.I),
+    (re.compile(r"(401|403|unauthorized|invalid[_ ]api[_ ]key|authentication[_ ]error|"
+                r"authentication[_ ]failed|not authenticated|please (re)?login|"
+                r"token (has )?expired)", re.I),
      "auth failed — re-login or check API key"),
     (re.compile(r"(model[_ ]not[_ ]found|unknown model|model .*does not exist|invalid model"
                 r"|no such model)", re.I),
@@ -426,22 +430,11 @@ STDERR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def summarize_stderr(stderr_path: Path, max_chars: int = 160) -> str | None:
-    """Return a short, human-readable hint for a failed run, or None.
-
-    Tries known patterns first (root-permission refusal, credit/auth/model
-    errors, network glitches), falls back to the last non-empty stderr line
-    truncated. Used purely for display; never affects exit_status.
-    """
-    if not stderr_path.exists():
-        return None
-    try:
-        text = stderr_path.read_text(errors="replace").strip()
-    except OSError:
-        return None
+def _label_or_snippet(text: str, max_chars: int = 160) -> str | None:
+    text = text.strip()
     if not text:
         return None
-    for rx, label in STDERR_PATTERNS:
+    for rx, label in ERROR_PATTERNS:
         if rx.search(text):
             return label
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -451,6 +444,56 @@ def summarize_stderr(stderr_path: Path, max_chars: int = 160) -> str | None:
     if len(snippet) > max_chars:
         snippet = snippet[: max_chars - 1] + "…"
     return snippet
+
+
+def _stdout_error_text(stdout_path: Path, runner: str) -> str:
+    """Extract the runner-reported error message from stdout.jsonl, if any.
+
+    Some runners (notably claude_code) do not write authentication or quota
+    errors to stderr — they emit a structured `result`/error event on stdout
+    with the human-readable message inside.
+    """
+    if not stdout_path.exists():
+        return ""
+    if runner == "claude_code":
+        msg = ""
+        for ev in _read_jsonl(stdout_path):
+            if ev.get("type") == "result" and ev.get("is_error"):
+                msg = (ev.get("result") or "").strip() or msg
+            elif ev.get("type") == "assistant" and ev.get("error"):
+                msg = msg or str(ev.get("error"))
+        return msg
+    if runner == "codex":
+        for ev in _read_jsonl(stdout_path):
+            if ev.get("type") in ("error", "turn.failed"):
+                return str(ev.get("message") or ev.get("error") or "")
+        return ""
+    if runner == "opencode":
+        # opencode surfaces tool/model errors inline; scan for explicit error parts.
+        for ev in _read_jsonl(stdout_path):
+            part = ev.get("part") or {}
+            if ev.get("type") == "error" or part.get("type") == "error":
+                return str(part.get("message") or ev.get("message") or "")
+        return ""
+    return ""
+
+
+def summarize_failure(stderr_path: Path, stdout_path: Path, runner: str) -> str | None:
+    """Return a short, human-readable hint for a failed run, or None.
+
+    Looks at stderr first (most CLI crashes land there), then falls back to
+    runner-specific error events in stdout.jsonl (authentication, quota,
+    etc. that the runner reports as a normal stdout event). Used purely for
+    display; never affects exit_status.
+    """
+    try:
+        stderr_text = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
+    except OSError:
+        stderr_text = ""
+    hint = _label_or_snippet(stderr_text)
+    if hint:
+        return hint
+    return _label_or_snippet(_stdout_error_text(stdout_path, runner))
 
 
 # ---------- common per-run logic ----------
@@ -549,7 +592,7 @@ def run_one(model: ModelCfg, challenge_dir: Path, run_dir: Path,
     if exit_status == "ok" and not flag_found and not final_text:
         exit_status = "no_flag_emitted"
 
-    error_hint = None if flag_found else summarize_stderr(stderr_path)
+    error_hint = None if flag_found else summarize_failure(stderr_path, stdout_path, model.runner)
 
     return {
         "model": model.name,
