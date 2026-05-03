@@ -539,6 +539,28 @@ def build_prompt(methodology: str | None) -> str:
     return BASE_PROMPT
 
 
+def _kill_pgrp(proc: subprocess.Popen) -> None:
+    """Send SIGTERM (then SIGKILL) to the runner's whole process group.
+
+    Each runner is launched with `preexec_fn=os.setsid`, so its pid is also
+    its pgid. Killing the group catches grandchildren (npm/node/bun shells
+    that wrap the actual CLI) that would otherwise survive the parent.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+            proc.wait(timeout=5)
+            return
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def run_one(model: ModelCfg, challenge_dir: Path, run_dir: Path,
             methodology: str | None, timeout: int,
             run_index: int, ts: str) -> dict:
@@ -574,15 +596,13 @@ def run_one(model: ModelCfg, challenge_dir: Path, run_dir: Path,
                 exit_status = "crash"
         except subprocess.TimeoutExpired:
             exit_status = "timeout"
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait(timeout=10)
-            except ProcessLookupError:
-                pass
+            _kill_pgrp(proc)
+        except KeyboardInterrupt:
+            # User Ctrl-C: tear down the runner's whole process group before
+            # propagating, otherwise the runner (claude/codex/opencode) keeps
+            # running detached after bench.py exits.
+            _kill_pgrp(proc)
+            raise
     wall = time.monotonic() - start
 
     parser = PARSERS[model.runner]
